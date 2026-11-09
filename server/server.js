@@ -5,6 +5,7 @@ const path = require("path");
 require("dotenv").config({ path: path.resolve(__dirname, ".env") });
 
 const connectDB = require("./config/db");
+const authRoutes = require("./routes/authRoutes");
 const { notFound, errorHandler } = require("./middleware/errorHandler");
 
 const app = express();
@@ -43,6 +44,9 @@ app.get("/api/health", (req, res) => {
     },
   });
 });
+
+// Mount API Routes
+app.use("/api/auth", authRoutes);
 
 // 404 Handler for undefined routes
 app.use(notFound);
