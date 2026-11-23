@@ -1,208 +1,84 @@
-const jwt = require("jsonwebtoken");
+const bcrypt = require("bcryptjs");
 const User = require("../models/User");
+const generateToken = require("../utils/generateToken");
 
-/**
- * Helper to generate signed JWT for authenticated user
- */
-const generateToken = (id) => {
-  return jwt.sign({ id }, process.env.JWT_SECRET, {
-    expiresIn: process.env.JWT_EXPIRES_IN || "7d",
-  });
-};
+const publicUser = (user) => ({
+  _id: user._id,
+  id: user._id,
+  name: user.name,
+  email: user.email,
+  studentId: user.studentId,
+  role: user.role,
+  ecoPoints: user.ecoPoints,
+  isActive: user.isActive,
+});
 
-/**
- * @desc    Register a new student
- * @route   POST /api/auth/register
- * @access  Public
- */
 const register = async (req, res, next) => {
   try {
-    const { name, email, password } = req.body;
-
-    // Validate required fields
-    if (!name || !email || !password) {
-      return res.status(400).json({
-        success: false,
-        message: "Please provide all required fields: name, email, and password",
-      });
+    const { name, email, studentId, password } = req.body;
+    if (!name || !email || !studentId || !password) {
+      return res.status(400).json({ message: "Name, email, student ID and password are required." });
+    }
+    if (String(password).length < 6) {
+      return res.status(400).json({ message: "Password must contain at least 6 characters." });
     }
 
-    if (password.length < 6) {
-      return res.status(400).json({
-        success: false,
-        message: "Password must be at least 6 characters long",
-      });
-    }
-
-    // Check if user already exists
-    const normalizedEmail = email.toLowerCase().trim();
-    const existingUser = await User.findOne({ email: normalizedEmail });
-
-    if (existingUser) {
-      return res.status(400).json({
-        success: false,
-        message: "A user with this email address already exists",
-      });
-    }
-
-    // Security: Always force role 'student' and ecoPoints 0 on public registration
-    const user = await User.create({
-      name: name.trim(),
-      email: normalizedEmail,
-      password,
-      role: "student",
-      ecoPoints: 0,
+    const normalizedEmail = String(email).trim().toLowerCase();
+    const normalizedStudentId = String(studentId).trim();
+    const existing = await User.findOne({
+      $or: [{ email: normalizedEmail }, { studentId: normalizedStudentId }],
     });
+    if (existing) return res.status(409).json({ message: "Email or student ID is already registered." });
 
-    const token = generateToken(user._id);
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const user = await User.create({
+      name: String(name).trim(),
+      email: normalizedEmail,
+      studentId: normalizedStudentId,
+      password: hashedPassword,
+      role: "student",
+    });
 
     return res.status(201).json({
-      success: true,
-      message: "User registered successfully",
-      token,
-      user: {
-        _id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        profileImage: user.profileImage,
-        ecoPoints: user.ecoPoints,
-        createdAt: user.createdAt,
-      },
+      message: "Account created successfully.",
+      token: generateToken(user._id),
+      user: publicUser(user),
     });
   } catch (error) {
+    if (error.code === 11000) return res.status(409).json({ message: "Email or student ID is already registered." });
     next(error);
   }
 };
 
-/**
- * @desc    Authenticate user & get token
- * @route   POST /api/auth/login
- * @access  Public
- */
 const login = async (req, res, next) => {
   try {
     const { email, password } = req.body;
+    if (!email || !password) return res.status(400).json({ message: "Email and password are required." });
 
-    // Validate request inputs
-    if (!email || !password) {
-      return res.status(400).json({
-        success: false,
-        message: "Please provide both email and password",
-      });
+    const user = await User.findOne({ email: String(email).trim().toLowerCase() }).select("+password");
+    if (!user || !(await bcrypt.compare(password, user.password))) {
+      return res.status(401).json({ message: "Invalid email or password." });
     }
+    if (!user.isActive) return res.status(403).json({ message: "Your account has been deactivated. Contact the administrator." });
 
-    const normalizedEmail = email.toLowerCase().trim();
-
-    // Explicitly include password for verification because select: false is on schema
-    const user = await User.findOne({ email: normalizedEmail }).select("+password");
-
-    if (!user) {
-      return res.status(401).json({
-        success: false,
-        message: "Invalid email or password",
-      });
-    }
-
-    const isMatch = await user.matchPassword(password);
-    if (!isMatch) {
-      return res.status(401).json({
-        success: false,
-        message: "Invalid email or password",
-      });
-    }
-
-    const token = generateToken(user._id);
-
-    return res.status(200).json({
-      success: true,
-      message: "Login successful",
-      token,
-      user: {
-        _id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        profileImage: user.profileImage,
-        ecoPoints: user.ecoPoints,
-        createdAt: user.createdAt,
-      },
+    return res.json({
+      message: "Login successful.",
+      token: generateToken(user._id),
+      user: publicUser(user),
     });
   } catch (error) {
     next(error);
   }
 };
 
-/**
- * @desc    Get currently logged in user profile
- * @route   GET /api/auth/me
- * @access  Protected
- */
-const getCurrentUser = async (req, res) => {
-  return res.status(200).json({
-    success: true,
-    user: req.user,
-  });
-};
-
-/**
- * @desc    Update current user profile (name, profileImage only)
- * @route   PUT /api/auth/profile
- * @access  Protected
- */
-const updateProfile = async (req, res, next) => {
+const getMe = async (req, res, next) => {
   try {
-    const user = await User.findById(req.user._id);
-
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: "User not found",
-      });
-    }
-
-    const { name, profileImage } = req.body;
-
-    // Update only allowed fields
-    if (name !== undefined) {
-      if (typeof name !== "string" || !name.trim()) {
-        return res.status(400).json({
-          success: false,
-          message: "Name cannot be empty",
-        });
-      }
-      user.name = name.trim();
-    }
-
-    if (profileImage !== undefined) {
-      user.profileImage = profileImage;
-    }
-
-    // Security: Any attempt to modify role or ecoPoints is strictly ignored
-    await user.save();
-
-    return res.status(200).json({
-      success: true,
-      message: "Profile updated successfully",
-      user: {
-        _id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        profileImage: user.profileImage,
-        ecoPoints: user.ecoPoints,
-        updatedAt: user.updatedAt,
-      },
-    });
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ message: "User not found." });
+    res.json({ user: publicUser(user) });
   } catch (error) {
     next(error);
   }
 };
 
-module.exports = {
-  register,
-  login,
-  getCurrentUser,
-  updateProfile,
-};
-
+module.exports = { register, login, getMe, publicUser };

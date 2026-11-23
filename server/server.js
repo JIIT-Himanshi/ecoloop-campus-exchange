@@ -1,90 +1,69 @@
+require("dotenv").config();
+
 const express = require("express");
 const cors = require("cors");
-const mongoose = require("mongoose");
-const path = require("path");
-require("dotenv").config({ path: path.resolve(__dirname, ".env") });
-
+const bcrypt = require("bcryptjs");
 const connectDB = require("./config/db");
-const authRoutes = require("./routes/authRoutes");
-const listingRoutes = require("./routes/listingRoutes");
-const requestRoutes = require("./routes/requestRoutes");
-const transactionRoutes = require("./routes/transactionRoutes");
-const wishlistRoutes = require("./routes/wishlistRoutes");
+const User = require("./models/User");
 const { notFound, errorHandler } = require("./middleware/errorHandler");
 
 const app = express();
 
-// Standard middleware
-app.use(cors());
-app.use(express.json());
+app.use(cors({
+  origin: process.env.CLIENT_URL ? process.env.CLIENT_URL.split(",").map((item) => item.trim()) : "http://localhost:5173",
+  credentials: true,
+}));
+app.use(express.json({ limit: "1mb" }));
+app.use(express.urlencoded({ extended: true }));
 
-// Base test route
-app.get("/", (req, res) => {
-  res.send("EcoLoop API is running");
-});
+app.get("/api/health", (req, res) => res.json({ status: "ok", message: "EcoLoop API is running." }));
 
-// Health check endpoint verifying server status & MongoDB connection state
-app.get("/api/health", (req, res) => {
-  const dbState = mongoose.connection.readyState;
-  const dbStatusMap = {
-    0: "disconnected",
-    1: "connected",
-    2: "connecting",
-    3: "disconnecting",
-  };
+app.use("/api/auth", require("./routes/authRoutes"));
+app.use("/api/users", require("./routes/userRoutes"));
+app.use("/api/reports", require("./routes/reportRoutes"));
+app.use("/api/listings", require("./routes/listingRoutes"));
+app.use("/api/requests", require("./routes/requestRoutes"));
+app.use("/api/wishlist", require("./routes/wishlistRoutes"));
+app.use("/api/transactions", require("./routes/transactionRoutes"));
+app.use("/api/notifications", require("./routes/notificationRoutes"));
+app.use("/api/admin", require("./routes/adminRoutes"));
 
-  const isDbConnected = dbState === 1;
-
-  res.status(isDbConnected ? 200 : 503).json({
-    success: isDbConnected,
-    message: isDbConnected
-      ? "EcoLoop API and database are operational"
-      : "EcoLoop API is running but database is not connected",
-    timestamp: new Date().toISOString(),
-    uptime: `${Math.floor(process.uptime())}s`,
-    database: {
-      status: dbStatusMap[dbState] || "unknown",
-      readyState: dbState,
-    },
-  });
-});
-
-// Mount API Routes
-app.use("/api/auth", authRoutes);
-app.use("/api/listings", listingRoutes);
-app.use("/api/requests", requestRoutes);
-app.use("/api/transactions", transactionRoutes);
-app.use("/api/wishlist", wishlistRoutes);
-
-// 404 Handler for undefined routes
 app.use(notFound);
-
-// Centralized error handler
 app.use(errorHandler);
+
+const createInitialAdmin = async () => {
+  const { ADMIN_NAME, ADMIN_EMAIL, ADMIN_STUDENT_ID, ADMIN_PASSWORD } = process.env;
+  if (!ADMIN_NAME || !ADMIN_EMAIL || !ADMIN_STUDENT_ID || !ADMIN_PASSWORD) return;
+
+  const email = ADMIN_EMAIL.trim().toLowerCase();
+  const existing = await User.findOne({ email });
+  if (existing) {
+    console.log("Initial admin already exists; bootstrap skipped.");
+    return;
+  }
+
+  const password = await bcrypt.hash(ADMIN_PASSWORD, 12);
+  await User.create({
+    name: ADMIN_NAME.trim(),
+    email,
+    studentId: ADMIN_STUDENT_ID.trim(),
+    password,
+    role: "admin",
+    isActive: true,
+  });
+  console.log("Initial admin account created from environment settings.");
+};
 
 const PORT = process.env.PORT || 5000;
 
-/**
- * Starts the server only after successful connection to MongoDB.
- */
-const startServer = async () => {
-  try {
-    await connectDB();
-    const server = app.listen(PORT, () => {
-      console.log(
-        `Server running in ${process.env.NODE_ENV || "development"} mode on port ${PORT}`
-      );
-    });
-    return server;
-  } catch (error) {
-    console.error("Unable to start server: MongoDB connection failed.");
-    console.error("Please configure a valid MONGO_URI in server/.env");
+connectDB()
+  .then(createInitialAdmin)
+  .then(() => {
+    app.listen(PORT, () => console.log(`EcoLoop server running on port ${PORT}.`));
+  })
+  .catch((error) => {
+    console.error("Server startup failed:", error.message);
     process.exit(1);
-  }
-};
+  });
 
-if (require.main === module) {
-  startServer();
-}
-
-module.exports = { app, startServer };
+module.exports = app;
